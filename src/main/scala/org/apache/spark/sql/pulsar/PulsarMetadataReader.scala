@@ -192,7 +192,9 @@ private[pulsar] case class PulsarMetadataReader(
     SpecificPulsarOffset(topicPartitions.map { tp =>
       (tp -> PulsarSourceUtils.seekableLatestMid(
         try {
-          admin.topics().getLastMessageId(tp)
+          RetryUtils.retry {
+            admin.topics().getLastMessageId(tp)
+          }
         } catch {
           case e: PulsarAdminException if e.getStatusCode == 404 =>
             MessageId.earliest
@@ -207,7 +209,9 @@ private[pulsar] case class PulsarMetadataReader(
 
   def fetchLatestOffsetForTopic(topic: String): MessageId = {
     PulsarSourceUtils.seekableLatestMid( try {
-      admin.topics().getLastMessageId(topic)
+      RetryUtils.retry {
+        admin.topics().getLastMessageId(topic)
+      }
     } catch {
       case e: PulsarAdminException if e.getStatusCode == 404 =>
         MessageId.earliest
