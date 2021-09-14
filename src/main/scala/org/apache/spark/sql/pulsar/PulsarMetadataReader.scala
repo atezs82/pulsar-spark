@@ -22,6 +22,7 @@ import java.util.regex.Pattern
 import org.apache.pulsar.client.admin.{PulsarAdmin, PulsarAdminException}
 import org.apache.pulsar.client.api.{Message, MessageId, PulsarClient, SubscriptionInitialPosition, SubscriptionType}
 import org.apache.pulsar.client.impl.schema.BytesSchema
+import org.apache.pulsar.client.internal.DefaultImplementation
 import org.apache.pulsar.common.naming.TopicName
 import org.apache.pulsar.common.schema.SchemaInfo
 
@@ -202,6 +203,81 @@ private[pulsar] case class PulsarMetadataReader(
               e)
         }
       ))
+    }.toMap)
+  }
+
+  def forwardOffsetByALedger(actualOffset: Option[Map[String, MessageId]]): SpecificPulsarOffset = {
+    getTopicPartitions()
+
+    SpecificPulsarOffset(topicPartitions.map { topic =>
+      (topic -> PulsarSourceUtils.seekableLatestMid {
+        // Fetch actual offset for topic
+        val topicActualMessageId = actualOffset match {
+          case Some(value) => value.getOrElse(topic, MessageId.earliest)
+          case None => MessageId.earliest
+        }
+        try {
+          // Create reader with actual offset
+          val localReader = client
+            .newReader()
+            .topic(topic)
+            .startMessageId(topicActualMessageId)
+            .startMessageIdInclusive()
+            .receiverQueueSize(1)
+            .create()
+          // Get the first message out
+          val startMsg = localReader.readNext()
+          // Get message params
+          var ledgerId = PulsarSourceUtils.getLedgerId(startMsg.getMessageId)
+          // Get entry ID
+          val entryId = PulsarSourceUtils.getEntryId(startMsg.getMessageId)
+          // Get partition ID
+          val partitionIndex = PulsarSourceUtils.getPartitionIndex(startMsg.getMessageId)
+          // If we are at the beginning of the ledger (entry==0), find its
+          // end, otherwise, step over to the next ledger
+          // We suspect in this case that we are at the end of the
+          // current ledger, so the next message will be from the
+          // next one.
+          // If there are no messages available then we have reached
+          // the end of the stream so we use the ledger from the
+          // message to prevent blocking.
+          if ((entryId != 0) && localReader.hasMessageAvailable) {
+            // Get ledger ID from the _next_ message
+            // (that would come from the next ledger)
+            val nextLedgerMessage = localReader.readNext()
+            ledgerId = PulsarSourceUtils.getLedgerId(nextLedgerMessage.getMessageId)
+          }
+          // Step to the end of the ledger
+          // by fabricating a custom message ID in the actual ledger
+          // Long.MaxValue == go to the end of the given ledger
+          // This might be the last message of the topic
+          localReader.seek(DefaultImplementation.newMessageId(ledgerId,
+            Long.MaxValue, partitionIndex))
+          // Read out this message
+          val endOfLedgerMessage = localReader.readNext()
+          // Close the reader
+          localReader.close()
+          val logMessage = s"Forwarded a single ledger. " +
+            s"Topic: $topic ActualOffset: $actualOffset " +
+            s"topic-actual-msgid: $topicActualMessageId " +
+            s"initial-msg: ${startMsg.getMessageId} " +
+            s"end-of-ledger-msg ${endOfLedgerMessage.getMessageId} " +
+            s"Ledger ID: $ledgerId Entry ID: $entryId " +
+            s"Partition index: $partitionIndex"
+          // scalastyle:off println
+          println(logMessage)
+          // scalastyle:on println
+          // Return the message ID
+          endOfLedgerMessage.getMessageId
+        } catch {
+          case e: PulsarAdminException if e.getStatusCode == 404 =>
+            MessageId.earliest
+          case e: Throwable =>
+            throw new RuntimeException(
+              s"Failed to get forwarded messageId for ${TopicName.get(topic).toString} " +
+                s"(tried to forward a single ledger from `$topicActualMessageId`)", e)
+        }
+      })
     }.toMap)
   }
 
