@@ -120,6 +120,36 @@ private[pulsar] object PulsarSourceUtils extends Logging {
     }
   }
 
+  def getLedgerId(mid: MessageId): Long = {
+    mid match {
+      case bmid: BatchMessageIdImpl =>
+        bmid.getLedgerId
+      case midi: MessageIdImpl => midi.getLedgerId
+      case t: TopicMessageIdImpl => getLedgerId(t.getInnerMessageId)
+      case up: UserProvidedMessageId => up.getLedgerId
+    }
+  }
+
+  def getEntryId(mid: MessageId): Long = {
+    mid match {
+      case bmid: BatchMessageIdImpl =>
+        bmid.getEntryId
+      case midi: MessageIdImpl => midi.getEntryId
+      case t: TopicMessageIdImpl => getEntryId(t.getInnerMessageId)
+      case up: UserProvidedMessageId => up.getEntryId
+    }
+  }
+
+  def getPartitionIndex(mid: MessageId): Int = {
+    mid match {
+      case bmid: BatchMessageIdImpl =>
+        bmid.getPartitionIndex
+      case midi: MessageIdImpl => midi.getPartitionIndex
+      case t: TopicMessageIdImpl => getPartitionIndex(t.getInnerMessageId)
+      case up: UserProvidedMessageId => up.getPartitionIndex
+    }
+  }
+
   def seekableLatestMid(mid: MessageId): MessageId = {
     if (messageExists(mid)) mid else MessageId.earliest
   }
@@ -182,6 +212,9 @@ private[pulsar] class PulsarOffsetRange private (
   def this() = this(null, null, null, None) // For deserialization only
 
   def topic: String = topic_
+
+  override def toString: String =
+    s"$topic ($fromOffset -> $untilOffset [${preferredLoc_.getOrElse("-- none --")}])"
 
   def fromOffset: MessageId = fromOffset_
 

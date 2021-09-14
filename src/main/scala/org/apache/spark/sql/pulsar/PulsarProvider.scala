@@ -110,7 +110,8 @@ private[pulsar] class PulsarProvider
       pollTimeoutMs(caseInsensitiveParams),
       failOnDataLoss(caseInsensitiveParams),
       subscriptionNamePrefix,
-      jsonOptions
+      jsonOptions,
+      parameters.getOrElse("oneLedgerPerTrigger", false).toString.toBoolean
     )
   }
 
