@@ -14,7 +14,7 @@
 package org.apache.spark.sql.pulsar
 
 import java.{util => ju}
-import java.io.Closeable
+import java.io.{Closeable, Reader}
 import java.util.{Optional, UUID}
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
@@ -41,7 +41,8 @@ private[pulsar] case class PulsarMetadataReader(
     clientConf: ju.Map[String, Object],
     adminClientConf: ju.Map[String, Object],
     driverGroupIdPrefix: String,
-    caseInsensitiveParameters: Map[String, String])
+    caseInsensitiveParameters: Map[String, String],
+    emptySchemaIfTopicSchemasAreDifferent: Boolean)
     extends Closeable
     with Logging {
 
@@ -164,11 +165,17 @@ private[pulsar] case class PulsarMetadataReader(
       }
       val sset = schemas.toSet
       if (sset.size != 1) {
-        throw new IllegalArgumentException(
-          s"Topics to read must share identical schema, " +
-            s"however we got ${sset.size} distinct schemas:[${sset.mkString(", ")}]")
+        if (emptySchemaIfTopicSchemasAreDifferent) {
+          SchemaUtils.emptySchemaInfo()
+        } else {
+          throw new IllegalArgumentException(
+            s"Topics to read must share identical schema. Consider setting " +
+              s"'emptySchemaIfTopicsHasDifferentSchemas' to true. " +
+              s"We got ${sset.size} distinct schemas:[${sset.mkString(", ")}]")
+        }
+      } else {
+        sset.head
       }
-      sset.head
     } else {
       // if no topic exists, and we are getting schema, then auto created topic has schema of None
       SchemaUtils.emptySchemaInfo()
@@ -206,11 +213,18 @@ private[pulsar] case class PulsarMetadataReader(
     }.toMap)
   }
 
+  def measure(fn: () => Unit): Long = {
+    val start = System.currentTimeMillis()
+    fn()
+    System.currentTimeMillis() - start
+  }
+
   def forwardOffsetByALedger(actualOffset: Option[Map[String, MessageId]]): SpecificPulsarOffset = {
     getTopicPartitions()
 
     SpecificPulsarOffset(topicPartitions.map { topic =>
       (topic -> PulsarSourceUtils.seekableLatestMid {
+        val start = System.currentTimeMillis()
         // Fetch actual offset for topic
         val topicActualMessageId = actualOffset match {
           case Some(value) => value.getOrElse(topic, MessageId.earliest)
@@ -223,10 +237,12 @@ private[pulsar] case class PulsarMetadataReader(
             .topic(topic)
             .startMessageId(topicActualMessageId)
             .startMessageIdInclusive()
-            .receiverQueueSize(1)
             .create()
           // Get the first message out
-          val startMsg = localReader.readNext()
+          var startMsg: Message[_] = null
+          var readTime = measure(() => {
+            startMsg = localReader.readNext()
+          })
           // Get message params
           var ledgerId = PulsarSourceUtils.getLedgerId(startMsg.getMessageId)
           // Get entry ID
@@ -244,31 +260,45 @@ private[pulsar] case class PulsarMetadataReader(
           if ((entryId != 0) && localReader.hasMessageAvailable) {
             // Get ledger ID from the _next_ message
             // (that would come from the next ledger)
-            val nextLedgerMessage = localReader.readNext()
+            var nextLedgerMessage: Message[_] = null
+            readTime += measure( () => {
+              nextLedgerMessage = localReader.readNext()
+            })
             ledgerId = PulsarSourceUtils.getLedgerId(nextLedgerMessage.getMessageId)
           }
           // Step to the end of the ledger
           // by fabricating a custom message ID in the actual ledger
           // Long.MaxValue == go to the end of the given ledger
           // This might be the last message of the topic
-          localReader.seek(DefaultImplementation.newMessageId(ledgerId,
-            Long.MaxValue, partitionIndex))
-          // Read out this message
-          val endOfLedgerMessage = localReader.readNext()
+          // Read out this message by creating a new ledger
+          var endOfLedgerMessageId: MessageId = null
+          readTime += measure( () => {
+            val localReader2 = client
+              .newReader()
+              .topic(topic)
+              .startMessageId(DefaultImplementation.newMessageId(ledgerId,
+                Long.MaxValue, partitionIndex))
+              .startMessageIdInclusive()
+              .create()
+            endOfLedgerMessageId = localReader2.readNext().getMessageId
+            localReader2.close()
+          })
           // Close the reader
           localReader.close()
-          val logMessage = s"Forwarded a single ledger. " +
-            s"Topic: $topic ActualOffset: $actualOffset " +
-            s"topic-actual-msgid: $topicActualMessageId " +
-            s"initial-msg: ${startMsg.getMessageId} " +
-            s"end-of-ledger-msg ${endOfLedgerMessage.getMessageId} " +
-            s"Ledger ID: $ledgerId Entry ID: $entryId " +
-            s"Partition index: $partitionIndex"
+          // Get out last message ID
+          val timeTook = System.currentTimeMillis() - start
+
+          val lastMessageInTopic = admin.topics().getLastMessageId(topic)
+          val logMessage = s"Topic: ...${topic.reverse.take(30).reverse} " +
+            s"From -> To: ${startMsg.getMessageId} -> " +
+            s"${endOfLedgerMessageId} " +
+            s"Last-msg: ${lastMessageInTopic} " +
+            s"time-took: ${timeTook} ms [read: $readTime ms] "
           // scalastyle:off println
           println(logMessage)
           // scalastyle:on println
           // Return the message ID
-          endOfLedgerMessage.getMessageId
+          endOfLedgerMessageId
         } catch {
           case e: PulsarAdminException if e.getStatusCode == 404 =>
             MessageId.earliest
@@ -277,6 +307,7 @@ private[pulsar] case class PulsarMetadataReader(
               s"Failed to get forwarded messageId for ${TopicName.get(topic).toString} " +
                 s"(tried to forward a single ledger from `$topicActualMessageId`)", e)
         }
+
       })
     }.toMap)
   }

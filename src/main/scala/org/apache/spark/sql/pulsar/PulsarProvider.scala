@@ -67,7 +67,10 @@ private[pulsar] class PulsarProvider
         clientConfig,
         adminClientConfig,
         subscriptionNamePrefix,
-        caseInsensitiveParams)) { reader =>
+        caseInsensitiveParams,
+        parameters
+          .getOrElse("emptySchemaIfTopicsHasDifferentSchemas", "false")
+          .toBoolean)) { reader =>
       reader.getAndCheckCompatible(schema)
     }
     (shortName(), inferredSchema)
@@ -90,7 +93,10 @@ private[pulsar] class PulsarProvider
       clientConfig,
       adminClientConfig,
       subscriptionNamePrefix,
-      caseInsensitiveParams)
+      caseInsensitiveParams,
+      parameters
+        .getOrElse("emptySchemaIfTopicsHasDifferentSchemas", "false")
+        .toBoolean)
 
     metadataReader.getAndCheckCompatible(schema)
 
@@ -111,7 +117,7 @@ private[pulsar] class PulsarProvider
       failOnDataLoss(caseInsensitiveParams),
       subscriptionNamePrefix,
       jsonOptions,
-      parameters.getOrElse("oneLedgerPerTrigger", false).toString.toBoolean
+      parameters.getOrElse("oneLedgerPerTrigger", "false").toBoolean
     )
   }
 
@@ -131,7 +137,10 @@ private[pulsar] class PulsarProvider
         clientConfig,
         adminClientConfig,
         subscriptionNamePrefix,
-        caseInsensitiveParams)) { reader =>
+        caseInsensitiveParams,
+        parameters
+          .getOrElse("emptySchemaIfTopicsHasDifferentSchemas", "false")
+          .toBoolean)) { reader =>
       val perTopicStarts = reader.startingOffsetForEachTopic(
         caseInsensitiveParams,
         EarliestOffset)
