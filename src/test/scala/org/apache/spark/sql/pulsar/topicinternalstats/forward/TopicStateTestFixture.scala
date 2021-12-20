@@ -13,10 +13,10 @@
  */
 package org.apache.spark.sql.pulsar.topicinternalstats.forward
 
-import java.util
+import org.apache.pulsar.common.policies.data.ManagedLedgerInternalStats.LedgerInfo
 
+import java.util
 import org.apache.pulsar.common.policies.data.PersistentTopicInternalStats
-import org.apache.pulsar.common.policies.data.PersistentTopicInternalStats.LedgerInfo
 
 object TopicStateFixture {
 
